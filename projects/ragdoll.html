@@ -1,0 +1,1337 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Enhanced Ragdoll Shooter Game</title>
+    <style>
+        canvas {
+            border: 1px solid #000;
+            display: block;
+            margin: 0 auto;
+            background: '#f0f0f0';
+        }
+        #hud {
+            text-align: center;
+            font-size: 20px;
+            margin-top: 10px;
+        }
+        #hud span {
+            margin: 0 20px;
+        }
+        #health-bar {
+            width: 200px;
+            height: 20px;
+            background: #ccc;
+            border: 1px solid #000;
+            margin: 0 auto;
+            position: relative;
+        }
+        #health-bar-inner {
+            width: 100%;
+            height: 100%;
+            background: #00cc00;
+        }
+        #weapon-display {
+            font-size: 18px;
+            margin-top: 10px;
+            text-align: center;
+        }
+    </style>
+</head>
+<body>
+
+<canvas id="world"></canvas>
+<div id="hud">
+    <span>Score: <span id="score">0</span></span>
+    <span>Health: <span id="health">100</span></span>
+    <div id="health-bar">
+        <div id="health-bar-inner"></div>
+    </div>
+    <div id="weapon-display"></div>
+    <div>Press 'W' to spawn the Wood Chipper</div>
+</div>
+
+<!-- Include Matter.js library -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/matter-js/0.19.0/matter.min.js"></script>
+
+<script>
+
+// Module aliases
+const Engine = Matter.Engine,
+      Render = Matter.Render,
+      World = Matter.World,
+      Bodies = Matter.Bodies,
+      Body = Matter.Body,
+      Composite = Matter.Composite,
+      Composites = Matter.Composites,
+      Constraint = Matter.Constraint,
+      Events = Matter.Events,
+      Mouse = Matter.Mouse,
+      Vector = Matter.Vector;
+
+// Create the physics engine and world
+const engine = Engine.create();
+const world = engine.world;
+
+// Adjust Gravity to Make Ragdolls Fall Slower
+engine.world.gravity.y = 0.25;
+
+// Restore original window size
+const canvasWidth = 840;
+const canvasHeight = 560;
+
+// Create the renderer with original window size
+const render = Render.create({
+    element: document.body,
+    canvas: document.getElementById('world'),
+    engine: engine,
+    options: {
+        width: canvasWidth,
+        height: canvasHeight,
+        wireframes: false,
+        background: '#f0f0f0'
+    }
+});
+
+// Collision categories
+const defaultCategory = 0x0001,
+      cannonCategory = 0x0002,
+      bulletCategory = 0x0004,
+      ragdollCategory = 0x0008,
+      groundCategory = 0x0010,
+      woodChipperCategory = 0x0020,
+      debrisCategory = 0x0040;
+
+// Game variables
+let score = 0;
+let health = 100;
+let bullets = [];
+let bloodParticles = [];
+let ragdolls = [];
+let groundRagdolls = []; // Keep track of ragdolls on the ground
+let debrisObjects = []; // Store debris objects
+let weaponMode = 'laser'; // Default weapon
+
+// Weapon modes and their corresponding keys
+const weaponModes = {
+    'laser': { name: 'Laser', key: 'L' },
+    'sniper': { name: 'Sniper', key: 'N' },
+    'missile': { name: 'Missile Launcher', key: 'M' },
+    'shotgun': { name: 'Shotgun', key: 'S' },
+    'ragdollLauncher': { name: 'Ragdoll Launcher', key: 'R' },
+    'laserBlaster': { name: 'Laser Blaster', key: 'B' },
+    'discShooter': { name: 'Disc Shooter', key: 'D' } // New weapon
+};
+
+// Update weapon display
+function updateWeaponDisplay() {
+    const weaponDisplay = document.getElementById('weapon-display');
+    let displayText = 'Weapon: ' + weaponModes[weaponMode].name + ' (' + weaponModes[weaponMode].key + ')';
+    displayText += '<br>Switch Weapons: ';
+    for (let mode in weaponModes) {
+        displayText += weaponModes[mode].name + ' (' + weaponModes[mode].key + ') ';
+    }
+    weaponDisplay.innerHTML = displayText;
+}
+
+// Initialize weapon display
+updateWeaponDisplay();
+
+// Create the Cannon in the Bottom Left Corner
+const cannon = Bodies.rectangle(70, canvasHeight - 50, 80, 40, {
+    isStatic: true,
+    collisionFilter: {
+        category: cannonCategory,
+        mask: defaultCategory // Cannon does not collide with bullets or ragdolls
+    },
+    render: {
+        fillStyle: '#333',
+        lineWidth: 0
+    }
+});
+World.add(world, cannon);
+
+// Ground to prevent ragdolls from falling through
+const ground = Bodies.rectangle(canvasWidth / 2, canvasHeight, canvasWidth, 60, {
+    isStatic: true,
+    collisionFilter: {
+        category: groundCategory,
+        mask: ragdollCategory | woodChipperCategory | debrisCategory // Ground collides with ragdoll parts, wood chipper, and debris
+    },
+    render: {
+        visible: false
+    }
+});
+World.add(world, ground);
+
+// Run the engine and renderer
+Engine.run(engine);
+Render.run(render);
+
+// Function to update the health number in the HUD
+function updateHealthDisplay() {
+    const healthDisplay = document.getElementById('health');
+    healthDisplay.innerText = health; // Update the text inside the health span
+    updateHealthBar();
+}
+
+// Function to update the health bar width based on current health
+function updateHealthBar() {
+    const healthBarInner = document.getElementById('health-bar-inner');
+    const healthPercentage = Math.max(health, 0); // Ensure health is not negative
+    healthBarInner.style.width = (healthPercentage * 2) + 'px'; // Set width based on health percentage (since health bar is 200px)
+}
+
+// Call this function whenever health changes
+function decreaseHealth(amount) {
+    health -= amount; // Decrease health
+    if (health < 0) health = 0; // Ensure health doesn't go below 0
+    updateHealthDisplay(); // Update the health number display
+    if (health <= 0) {
+        alert('Game Over! Your Score: ' + score);
+        window.location.reload(); // Reload game if health is 0
+    }
+}
+
+// Function to create a random color
+function getRandomColor() {
+    const letters = '789ABCD'.split('');
+    let color = '#';
+    for (let i = 0; i < 6; i++ ) {
+        color += letters[Math.floor(Math.random() * letters.length)];
+    }
+    return color;
+}
+
+// Function to create a ragdoll with various body shapes and sizes
+function createRagdoll(x, y, scale = 1, options = {}) {
+    const group = Body.nextGroup(true);
+    const colors = {
+        skin: options.skinColor || '#FFDBAC', // Skin color
+        shirt: options.shirtColor || getRandomColor(),
+        pants: options.pantsColor || getRandomColor(),
+        shoes: options.shoesColor || '#333'
+    };
+
+    // Randomly adjust body width and height to simulate different body types
+    const bodyWidthMultiplier = options.bodyWidthMultiplier || (Math.random() * 0.8 + 1.2); // Width between 120% and 200% of normal
+    const bodyHeightMultiplier = options.bodyHeightMultiplier || (Math.random() * 0.5 + 0.9); // Height between 90% and 140% of normal
+    const bodyWidth = 30 * scale * bodyWidthMultiplier;
+    const bodyHeight = 50 * scale * bodyHeightMultiplier;
+    const limbWidth = 10 * scale * (bodyWidth / (30 * scale)); // Adjust limb width proportionally
+    const limbHeight = 30 * scale * (bodyHeight / (50 * scale)); // Adjust limb height proportionally
+
+    // Rendering options to remove white shadows
+    const renderOptions = {
+        strokeStyle: 'transparent',
+        lineWidth: 0
+    };
+
+    // Head
+    const headSize = 15 * scale * (bodyWidth / (30 * scale));
+    const head = Bodies.circle(x, y - 85 * scale * bodyHeightMultiplier, headSize, {
+        label: 'ragdollPart',
+        collisionFilter: {
+            group: group,
+            category: ragdollCategory,
+            mask: bulletCategory | groundCategory | ragdollCategory | woodChipperCategory | debrisCategory
+        },
+        render: { fillStyle: colors.skin, ...renderOptions }
+    });
+
+    // Torso
+    const torso = Bodies.rectangle(x, y - 40 * scale, bodyWidth, bodyHeight, {
+        label: 'ragdollPart',
+        collisionFilter: {
+            group: group,
+            category: ragdollCategory,
+            mask: bulletCategory | groundCategory | ragdollCategory | woodChipperCategory | debrisCategory
+        },
+        render: { fillStyle: colors.shirt, ...renderOptions }
+    });
+
+    // Left Upper Arm
+    const leftUpperArm = Bodies.rectangle(x - (15 + bodyWidth / 2) * scale, y - 55 * scale, limbWidth, limbHeight, {
+        label: 'ragdollPart',
+        collisionFilter: {
+            group: group,
+            category: ragdollCategory,
+            mask: bulletCategory | groundCategory | ragdollCategory | woodChipperCategory | debrisCategory
+        },
+        render: { fillStyle: colors.skin, ...renderOptions }
+    });
+
+    // Left Lower Arm
+    const leftLowerArm = Bodies.rectangle(x - (15 + bodyWidth / 2) * scale, y - 30 * scale, limbWidth, limbHeight, {
+        label: 'ragdollPart',
+        collisionFilter: {
+            group: group,
+            category: ragdollCategory,
+            mask: bulletCategory | groundCategory | ragdollCategory | woodChipperCategory | debrisCategory
+        },
+        render: { fillStyle: colors.skin, ...renderOptions }
+    });
+
+    // Right Upper Arm
+    const rightUpperArm = Bodies.rectangle(x + (15 + bodyWidth / 2) * scale, y - 55 * scale, limbWidth, limbHeight, {
+        label: 'ragdollPart',
+        collisionFilter: {
+            group: group,
+            category: ragdollCategory,
+            mask: bulletCategory | groundCategory | ragdollCategory | woodChipperCategory | debrisCategory
+        },
+        render: { fillStyle: colors.skin, ...renderOptions }
+    });
+
+    // Right Lower Arm
+    const rightLowerArm = Bodies.rectangle(x + (15 + bodyWidth / 2) * scale, y - 30 * scale, limbWidth, limbHeight, {
+        label: 'ragdollPart',
+        collisionFilter: {
+            group: group,
+            category: ragdollCategory,
+            mask: bulletCategory | groundCategory | ragdollCategory | woodChipperCategory | debrisCategory
+        },
+        render: { fillStyle: colors.skin, ...renderOptions }
+    });
+
+    // Left Upper Leg
+    const leftUpperLeg = Bodies.rectangle(x - 10 * scale, y + 0 * scale, limbWidth, limbHeight * 1.2, {
+        label: 'ragdollPart',
+        collisionFilter: {
+            group: group,
+            category: ragdollCategory,
+            mask: bulletCategory | groundCategory | ragdollCategory | woodChipperCategory | debrisCategory
+        },
+        render: { fillStyle: colors.pants, ...renderOptions }
+    });
+
+    // Left Lower Leg
+    const leftLowerLeg = Bodies.rectangle(x - 10 * scale, y + 30 * scale, limbWidth, limbHeight * 1.2, {
+        label: 'ragdollPart',
+        collisionFilter: {
+            group: group,
+            category: ragdollCategory,
+            mask: bulletCategory | groundCategory | ragdollCategory | woodChipperCategory | debrisCategory
+        },
+        render: { fillStyle: colors.pants, ...renderOptions }
+    });
+
+    // Right Upper Leg
+    const rightUpperLeg = Bodies.rectangle(x + 10 * scale, y + 0 * scale, limbWidth, limbHeight * 1.2, {
+        label: 'ragdollPart',
+        collisionFilter: {
+            group: group,
+            category: ragdollCategory,
+            mask: bulletCategory | groundCategory | ragdollCategory | woodChipperCategory | debrisCategory
+        },
+        render: { fillStyle: colors.pants, ...renderOptions }
+    });
+
+    // Right Lower Leg
+    const rightLowerLeg = Bodies.rectangle(x + 10 * scale, y + 30 * scale, limbWidth, limbHeight * 1.2, {
+        label: 'ragdollPart',
+        collisionFilter: {
+            group: group,
+            category: ragdollCategory,
+            mask: bulletCategory | groundCategory | ragdollCategory | woodChipperCategory | debrisCategory
+        },
+        render: { fillStyle: colors.pants, ...renderOptions }
+    });
+
+    // Constraints (joints)
+    const headToTorso = Constraint.create({
+        bodyA: head,
+        pointA: { x: 0, y: headSize },
+        bodyB: torso,
+        pointB: { x: 0, y: -bodyHeight / 2 },
+        stiffness: 0.5
+    });
+
+    const leftUpperArmToTorso = Constraint.create({
+        bodyA: leftUpperArm,
+        pointA: { x: 0, y: -limbHeight / 2 },
+        bodyB: torso,
+        pointB: { x: -bodyWidth / 2, y: -bodyHeight / 4 },
+        stiffness: 0.5
+    });
+
+    const leftLowerArmToUpperArm = Constraint.create({
+        bodyA: leftLowerArm,
+        pointA: { x: 0, y: -limbHeight / 2 },
+        bodyB: leftUpperArm,
+        pointB: { x: 0, y: limbHeight / 2 },
+        stiffness: 0.5
+    });
+
+    const rightUpperArmToTorso = Constraint.create({
+        bodyA: rightUpperArm,w
+        pointA: { x: 0, y: -limbHeight / 2 },
+        bodyB: torso,
+        pointB: { x: bodyWidth / 2, y: -bodyHeight / 4 },
+        stiffness: 0.5
+    });
+
+    const rightLowerArmToUpperArm = Constraint.create({
+        bodyA: rightLowerArm,
+        pointA: { x: 0, y: -limbHeight / 2 },
+        bodyB: rightUpperArm,
+        pointB: { x: 0, y: limbHeight / 2 },
+        stiffness: 0.5
+    });
+
+    const leftUpperLegToTorso = Constraint.create({
+        bodyA: leftUpperLeg,
+        pointA: { x: 0, y: -limbHeight * 0.6 },
+        bodyB: torso,
+        pointB: { x: -10 * scale, y: bodyHeight / 2 },
+        stiffness: 0.5
+    });
+
+    const leftLowerLegToUpperLeg = Constraint.create({
+        bodyA: leftLowerLeg,
+        pointA: { x: 0, y: -limbHeight * 0.6 },
+        bodyB: leftUpperLeg,
+        pointB: { x: 0, y: limbHeight * 0.6 },
+        stiffness: 0.5
+    });
+
+    const rightUpperLegToTorso = Constraint.create({
+        bodyA: rightUpperLeg,
+        pointA: { x: 0, y: -limbHeight * 0.6 },
+        bodyB: torso,
+        pointB: { x: 10 * scale, y: bodyHeight / 2 },
+        stiffness: 0.5
+    });
+
+    const rightLowerLegToUpperLeg = Constraint.create({
+        bodyA: rightLowerLeg,
+        pointA: { x: 0, y: -limbHeight * 0.6 },
+        bodyB: rightUpperLeg,
+        pointB: { x: 0, y: limbHeight * 0.6 },
+        stiffness: 0.5
+    });
+
+    // Composite ragdoll
+    const ragdollComposite = Composite.create({
+        bodies: [
+            head, torso,
+            leftUpperArm, leftLowerArm,
+            rightUpperArm, rightLowerArm,
+            leftUpperLeg, leftLowerLeg,
+            rightUpperLeg, rightLowerLeg
+        ],
+        constraints: [
+            headToTorso,
+            leftUpperArmToTorso, leftLowerArmToUpperArm,
+            rightUpperArmToTorso, rightLowerArmToUpperArm,
+            leftUpperLegToTorso, leftLowerLegToUpperLeg,
+            rightUpperLegToTorso, rightLowerLegToUpperLeg
+        ]
+    });
+
+    // Randomize Ragdoll Orientation (Full Rotation)
+    const randomAngle = Math.random() * 2 * Math.PI; // Random angle between 0 and 360 degrees
+    Composite.rotate(ragdollComposite, randomAngle, { x: x, y: y - 40 * scale });
+
+    // Add subtle motion to limbs as they fall
+    Body.applyForce(leftUpperArm, leftUpperArm.position, { x: Math.random() * 0.001, y: Math.random() * 0.001 });
+    Body.applyForce(rightUpperArm, rightUpperArm.position, { x: Math.random() * 0.001, y: Math.random() * 0.001 });
+    Body.applyForce(leftUpperLeg, leftUpperLeg.position, { x: Math.random() * 0.001, y: Math.random() * 0.001 });
+    Body.applyForce(rightUpperLeg, rightUpperLeg.position, { x: Math.random() * 0.001, y: Math.random() * 0.001 });
+
+    return ragdollComposite;
+}
+
+// Function to spawn a ragdoll at random position and size
+function spawnRagdoll() {
+    const x = Math.random() * (canvasWidth - 240) + 120; // Spawn within canvas boundaries
+    const y = -100;
+    const scale = Math.random() * 0.3 + 0.7;
+    const bodyOptions = {
+        bodyWidthMultiplier: Math.random() * 1.0 + 1.0, // Width between 100% and 200% of normal
+        bodyHeightMultiplier: Math.random() * 0.5 + 0.8 // Height between 80% and 130% of normal
+    };
+    const ragdoll = createRagdoll(x, y, scale, bodyOptions);
+    ragdoll.label = 'ragdoll';
+    ragdoll.healthDecreased = false; // Track if health has been decreased for this ragdoll
+    ragdoll.isHit = false; // Track if the ragdoll has been hit by any weapon
+    ragdolls.push(ragdoll);
+    World.add(world, ragdoll);
+}
+
+// Spawn ragdolls at intervals
+setInterval(spawnRagdoll, 2000);
+
+// Function to create random debris objects
+function createDebris() {
+    const x = Math.random() * canvasWidth;
+    const y = -50;
+    const size = Math.random() * 20 + 10;
+    const debris = Bodies.rectangle(x, y, size, size, {
+        label: 'debris',
+        collisionFilter: {
+            category: debrisCategory,
+            mask: ragdollCategory | groundCategory | debrisCategory
+        },
+        render: {
+            fillStyle: '#A9A9A9',
+            strokeStyle: 'transparent',
+            lineWidth: 0
+        }
+    });
+    debrisObjects.push(debris);
+    World.add(world, debris);
+}
+
+// Spawn debris at intervals
+setInterval(createDebris, 3000);
+
+// Mouse control for aiming
+const mouse = Mouse.create(render.canvas);
+render.mouse = mouse;
+
+// Laser tracer variables
+let isAiming = false;
+
+// Event listeners for aiming and shooting
+document.addEventListener('mousemove', function(event) {
+    isAiming = true;
+});
+
+document.addEventListener('mousedown', function(event) {
+    isAiming = false;
+
+    // Calculate shooting direction
+    const rect = render.canvas.getBoundingClientRect();
+    const mouseX = event.clientX - rect.left;
+    const mouseY = event.clientY - rect.top;
+
+    const shooterX = cannon.position.x;
+    const shooterY = cannon.position.y;
+
+    // Adjusted angle calculation to fix bullet firing direction
+    const angle = Math.atan2(mouseY - shooterY, mouseX - shooterX);
+
+    if (weaponMode === 'laser') {
+        // Laser: Fast rate of fire, low damage
+        // Fire multiple bullets in a spread
+        const bulletCount = 3;
+        const spread = 0.2; // Spread angle
+
+        for (let i = 0; i < bulletCount; i++) {
+            const offsetAngle = angle + (i - (bulletCount - 1) / 2) * spread;
+            const bullet = Bodies.circle(shooterX, shooterY, 5, {
+                label: 'bullet',
+                weapon: 'laser',
+                collisionFilter: {
+                    category: bulletCategory,
+                    mask: ragdollCategory // Bullets only collide with ragdoll parts
+                },
+                render: {
+                    fillStyle: '#00FF00', // Green bullets for laser
+                    strokeStyle: 'transparent',
+                    lineWidth: 0
+                }
+            });
+
+            const speed = 30;
+            Body.setVelocity(bullet, {
+                x: speed * Math.cos(offsetAngle),
+                y: speed * Math.sin(offsetAngle)
+            });
+
+            bullets.push(bullet);
+            World.add(world, bullet);
+        }
+    } else if (weaponMode === 'sniper') {
+        // Sniper: Slow rate of fire, high damage
+        // Fire a single, fast bullet
+        const bullet = Bodies.circle(shooterX, shooterY, 5, {
+            label: 'bullet',
+            weapon: 'sniper',
+            collisionFilter: {
+                category: bulletCategory,
+                mask: ragdollCategory // Bullets only collide with ragdoll parts
+            },
+            render: {
+                fillStyle: '#0000FF', // Blue bullet for sniper
+                strokeStyle: 'transparent',
+                lineWidth: 0
+            }
+        });
+
+        const speed = 50; // Faster bullet
+        Body.setVelocity(bullet, {
+            x: speed * Math.cos(angle),
+            y: speed * Math.sin(angle)
+        });
+
+        bullets.push(bullet);
+        World.add(world, bullet);
+    } else if (weaponMode === 'missile') {
+        // Missile Launcher: Larger explosion
+        // Fire a missile
+        const missile = Bodies.rectangle(shooterX, shooterY, 20, 10, {
+            label: 'missile',
+            weapon: 'missile',
+            collisionFilter: {
+                category: bulletCategory,
+                mask: ragdollCategory | groundCategory | woodChipperCategory | debrisCategory // Missile collides with everything
+            },
+            render: {
+                fillStyle: '#FFA500', // Orange missile
+                strokeStyle: 'transparent',
+                lineWidth: 0
+            }
+        });
+
+        const speed = 25;
+        Body.setVelocity(missile, {
+            x: speed * Math.cos(angle),
+            y: speed * Math.sin(angle)
+        });
+        Body.setAngle(missile, angle);
+
+        bullets.push(missile);
+        World.add(world, missile);
+    } else if (weaponMode === 'shotgun') {
+        // Shotgun: Adjusted thickness and dispersion
+        // Fire multiple pellets with adjusted spread
+        const pelletCount = 12; // Increased number of pellets
+        const spread = 0.4; // Tighter spread
+
+        for (let i = 0; i < pelletCount; i++) {
+            const offsetAngle = angle + (i - (pelletCount - 1) / 2) * spread / pelletCount;
+            const pellet = Bodies.circle(shooterX, shooterY, 3, {
+                label: 'bullet',
+                weapon: 'shotgun',
+                collisionFilter: {
+                    category: bulletCategory,
+                    mask: ragdollCategory // Pellets only collide with ragdoll parts
+                },
+                render: {
+                    fillStyle: '#8B4513', // Brown pellets for shotgun
+                    strokeStyle: 'transparent',
+                    lineWidth: 0
+                }
+            });
+
+            const speed = 35;
+            Body.setVelocity(pellet, {
+                x: speed * Math.cos(offsetAngle),
+                y: speed * Math.sin(offsetAngle)
+            });
+
+            bullets.push(pellet);
+            World.add(world, pellet);
+        }
+    } else if (weaponMode === 'ragdollLauncher') {
+        // Ragdoll Launcher: Launches a fat ragdoll as a projectile
+        const ragdoll = createRagdoll(shooterX, shooterY, 1, {
+            bodyWidthMultiplier: 2.5 // Make the ragdoll extra fat
+        });
+        Composite.allBodies(ragdoll).forEach(body => {
+            body.collisionFilter.category = bulletCategory;
+            body.collisionFilter.mask = ragdollCategory | groundCategory | woodChipperCategory | debrisCategory;
+            body.label = 'bullet';
+            body.weapon = 'ragdollLauncher';
+        });
+        Composite.translate(ragdoll, { x: 0, y: -100 }); // Adjust position so it doesn't collide with cannon
+
+        const speed = 20; // Slowed down the ragdoll launcher
+        Composite.allBodies(ragdoll).forEach(body => {
+            Body.setVelocity(body, {
+                x: speed * Math.cos(angle),
+                y: speed * Math.sin(angle)
+            });
+        });
+
+        bullets.push(ragdoll);
+        World.add(world, ragdoll);
+    } else if (weaponMode === 'laserBlaster') {
+        // Laser Blaster: High-speed laser that vaporizes ragdolls with flash
+        const laserBeamLength = 2000; // Long enough to cover the canvas
+        const laserBeam = Bodies.rectangle(
+            shooterX + laserBeamLength / 2 * Math.cos(angle), // Center of the laser beam
+            shooterY + laserBeamLength / 2 * Math.sin(angle),
+            laserBeamLength,
+            5, // Laser beam thickness
+            {
+                label: 'laserBeam',
+                weapon: 'laserBlaster',
+                isSensor: true,
+                collisionFilter: {
+                    category: bulletCategory,
+                    mask: ragdollCategory // Laser beam only collides with ragdoll parts
+                },
+                render: {
+                    fillStyle: '#FFFF00', // Yellow laser beam
+                    opacity: 0.5,
+                    strokeStyle: 'transparent',
+                    lineWidth: 0
+                }
+            }
+        );
+        Body.setAngle(laserBeam, angle);
+
+        bullets.push(laserBeam);
+        World.add(world, laserBeam);
+    } else if (weaponMode === 'discShooter') {
+        // Disc Shooter: Shoots discs that chop ragdolls in half
+        const disc = Bodies.circle(shooterX, shooterY, 10, {
+            label: 'bullet',
+            weapon: 'discShooter',
+            collisionFilter: {
+                category: bulletCategory,
+                mask: ragdollCategory // Discs only collide with ragdoll parts
+            },
+            render: {
+                fillStyle: '#808080', // Gray discs
+                strokeStyle: 'transparent',
+                lineWidth: 0
+            }
+        });
+
+        const speed = 40;
+        Body.setVelocity(disc, {
+            x: speed * Math.cos(angle),
+            y: speed * Math.sin(angle)
+        });
+
+        bullets.push(disc);
+        World.add(world, disc);
+    }
+});
+
+// Weapon mode switching
+document.addEventListener('keydown', function(event) {
+    const keyToWeapon = {};
+    for (let mode in weaponModes) {
+        keyToWeapon['Key' + weaponModes[mode].key.toUpperCase()] = mode;
+    }
+
+    if (keyToWeapon[event.code]) {
+        weaponMode = keyToWeapon[event.code];
+        updateWeaponDisplay();
+    }
+});
+
+// Collision detection
+Events.on(engine, 'collisionStart', function(event) {
+    const pairs = event.pairs;
+
+    pairs.forEach(function(pair) {
+        const bodyA = pair.bodyA;
+        const bodyB = pair.bodyB;
+
+        // Handle collision between bullet/missile/laser/disc and ragdollPart
+        let projectile, ragdollPart;
+        if ((bodyA.label === 'bullet' || bodyA.label === 'missile' || bodyA.label === 'laserBeam') && bodyB.label === 'ragdollPart') {
+            projectile = bodyA;
+            ragdollPart = bodyB;
+        } else if ((bodyB.label === 'bullet' || bodyB.label === 'missile' || bodyB.label === 'laserBeam') && bodyA.label === 'ragdollPart') {
+            projectile = bodyB;
+            ragdollPart = bodyA;
+        }
+
+        if (projectile && ragdollPart) {
+            // Find the ragdoll composite that this part belongs to
+            let ragdollToModify = null;
+            for (let ragdoll of ragdolls) {
+                if (Composite.allBodies(ragdoll).includes(ragdollPart)) {
+                    ragdollToModify = ragdoll;
+                    break;
+                }
+            }
+
+            if (ragdollToModify) {
+                ragdollToModify.isHit = true; // Mark the ragdoll as hit
+            }
+
+            if (projectile.label === 'missile') {
+                // Cause larger area damage
+                causeExplosion(projectile.position.x, projectile.position.y, 150); // Increased radius to 150 pixels
+                // Remove missile
+                World.remove(world, projectile);
+                bullets.splice(bullets.indexOf(projectile), 1);
+            } else if (projectile.weapon === 'sniper') {
+                if (ragdollToModify) {
+                    // Dismember the entire ragdoll
+                    dismemberRagdoll(ragdollToModify);
+
+                    // Increase score
+                    score += 50;
+                    document.getElementById('score').innerText = score;
+                }
+
+                // Remove projectile
+                World.remove(world, projectile);
+                bullets.splice(bullets.indexOf(projectile), 1);
+            } else if (projectile.weapon === 'shotgun') {
+                if (ragdollToModify) {
+                    // Remove constraints connected to the body part
+                    const constraints = Composite.allConstraints(ragdollToModify);
+                    constraints.forEach(constraint => {
+                        if (constraint.bodyA === ragdollPart || constraint.bodyB === ragdollPart) {
+                            Composite.remove(ragdollToModify, constraint);
+                        }
+                    });
+
+                    // Remove the body part
+                    Composite.remove(ragdollToModify, ragdollPart);
+
+                    // Increase score
+                    score += 15;
+                    document.getElementById('score').innerText = score;
+
+                    // Create blood particles
+                    createBloodParticles(projectile.position.x, projectile.position.y, 20);
+                }
+
+                // Remove projectile
+                World.remove(world, projectile);
+                bullets.splice(bullets.indexOf(projectile), 1);
+            } else if (projectile.weapon === 'laser') {
+                if (ragdollToModify) {
+                    // Remove constraints connected to the body part
+                    const constraints = Composite.allConstraints(ragdollToModify);
+                    constraints.forEach(constraint => {
+                        if (constraint.bodyA === ragdollPart || constraint.bodyB === ragdollPart) {
+                            Composite.remove(ragdollToModify, constraint);
+                        }
+                    });
+
+                    // Remove the body part
+                    Composite.remove(ragdollToModify, ragdollPart);
+
+                    // Increase score
+                    score += 10;
+                    document.getElementById('score').innerText = score;
+
+                    // Create blood particles
+                    createBloodParticles(projectile.position.x, projectile.position.y, 10);
+                }
+
+                // Remove projectile
+                World.remove(world, projectile);
+                bullets.splice(bullets.indexOf(projectile), 1);
+            } else if (projectile.weapon === 'ragdollLauncher') {
+                if (ragdollToModify) {
+                    // Dismember the entire ragdoll
+                    dismemberRagdoll(ragdollToModify);
+
+                    // Increase score
+                    score += 50;
+                    document.getElementById('score').innerText = score;
+                }
+            } else if (projectile.weapon === 'laserBlaster') {
+                if (ragdollToModify) {
+                    // Flash effect before evaporating
+                    flashRagdoll(ragdollToModify);
+                    // Create blood particles
+                    createBloodParticles(ragdollPart.position.x, ragdollPart.position.y, 30);
+                    // Increase score
+                    score += 100;
+                    document.getElementById('score').innerText = score;
+
+                    setTimeout(() => {
+                        evaporateRagdoll(ragdollToModify);
+                    }, 100); // Delay to allow flash effect
+                }
+            } else if (projectile.weapon === 'discShooter') {
+                if (ragdollToModify) {
+                    // Chop the ragdoll in half
+                    chopRagdollInHalf(ragdollToModify, ragdollPart);
+
+                    // Increase score
+                    score += 75;
+                    document.getElementById('score').innerText = score;
+                }
+
+                // Remove projectile
+                World.remove(world, projectile);
+                bullets.splice(bullets.indexOf(projectile), 1);
+            }
+        }
+
+        // Handle collision between woodChipper and ragdollPart
+        if ((bodyA.label === 'woodChipper' && bodyB.label === 'ragdollPart') ||
+            (bodyB.label === 'woodChipper' && bodyA.label === 'ragdollPart')) {
+
+            const ragdollPart = bodyA.label === 'ragdollPart' ? bodyA : bodyB;
+
+            // Find the ragdoll composite that this part belongs to
+            let ragdollToRemove = null;
+            for (let ragdoll of ragdolls) {
+                if (Composite.allBodies(ragdoll).includes(ragdollPart)) {
+                    ragdollToRemove = ragdoll;
+                    break;
+                }
+            }
+
+            if (ragdollToRemove) {
+                // Remove the ragdoll from the world and arrays
+                World.remove(world, ragdollToRemove);
+                ragdolls.splice(ragdolls.indexOf(ragdollToRemove), 1);
+                const index = groundRagdolls.indexOf(ragdollToRemove);
+                if (index !== -1) {
+                    groundRagdolls.splice(index, 1);
+                }
+
+                // Increase score when a ragdoll is "chipped"
+                score += 50;
+                document.getElementById('score').innerText = score;
+
+                // Spawn ragdoll pieces
+                spawnRagdollPieces(ragdollPart.position.x, ragdollPart.position.y);
+
+                // Create extra blood particles
+                createBloodParticles(ragdollPart.position.x, ragdollPart.position.y, 50); // Increased particles
+            }
+        }
+    });
+});
+
+// Function to dismember a ragdoll completely
+function dismemberRagdoll(ragdoll) {
+    const bodies = Composite.allBodies(ragdoll);
+    const constraints = Composite.allConstraints(ragdoll);
+
+    // Remove all constraints
+    constraints.forEach(constraint => {
+        Composite.remove(ragdoll, constraint);
+    });
+
+    // Remove the ragdoll from the main array
+    ragdolls.splice(ragdolls.indexOf(ragdoll), 1);
+
+    // Add all bodies back to the world individually
+    bodies.forEach(body => {
+        World.add(world, body);
+    });
+}
+
+// Function to flash a ragdoll (used for laser blaster effect)
+function flashRagdoll(ragdoll) {
+    const bodies = Composite.allBodies(ragdoll);
+    bodies.forEach(body => {
+        const originalColor = body.render.fillStyle;
+        body.render.fillStyle = '#FFFFFF'; // Flash white
+        // Restore the original color after a short delay
+        setTimeout(() => {
+            body.render.fillStyle = originalColor;
+        }, 100);
+    });
+}
+
+// Function to evaporate a ragdoll
+function evaporateRagdoll(ragdoll) {
+    // Remove the ragdoll from the world and arrays
+    World.remove(world, ragdoll);
+    ragdolls.splice(ragdolls.indexOf(ragdoll), 1);
+
+    // Create evaporation effect (e.g., particles)
+    createEvaporationParticles(ragdoll.bodies[0].position.x, ragdoll.bodies[0].position.y);
+}
+
+// Function to create evaporation particles
+function createEvaporationParticles(x, y) {
+    for (let i = 0; i < 50; i++) {
+        const particle = Bodies.circle(x, y, 2, {
+            label: 'evaporation',
+            isSensor: true,
+            render: { fillStyle: '#FFFFFF', strokeStyle: 'transparent', lineWidth: 0 }
+        });
+        const angle = Math.random() * 2 * Math.PI;
+        const speed = Math.random() * 2 + 1;
+        Body.setVelocity(particle, {
+            x: speed * Math.cos(angle),
+            y: speed * Math.sin(angle)
+        });
+        bloodParticles.push(particle);
+        World.add(world, particle);
+    }
+}
+
+// Function to chop a ragdoll in half
+function chopRagdollInHalf(ragdoll, hitPart) {
+    const bodies = Composite.allBodies(ragdoll);
+    const constraints = Composite.allConstraints(ragdoll);
+
+    // Determine which side of the ragdoll to remove based on the hit part
+    const indexOfHitPart = bodies.indexOf(hitPart);
+    const upperBodyParts = bodies.slice(0, indexOfHitPart + 1);
+    const lowerBodyParts = bodies.slice(indexOfHitPart + 1);
+
+    // Remove constraints connected to the lower body parts
+    constraints.forEach(constraint => {
+        if (lowerBodyParts.includes(constraint.bodyA) || lowerBodyParts.includes(constraint.bodyB)) {
+            Composite.remove(ragdoll, constraint);
+        }
+    });
+
+    // Remove lower body parts
+    lowerBodyParts.forEach(body => {
+        Composite.remove(ragdoll, body);
+    });
+
+    // Create blood particles
+    createBloodParticles(hitPart.position.x, hitPart.position.y, 30);
+}
+
+// Function to create blood particles
+function createBloodParticles(x, y, count = 30) {
+    for (let i = 0; i < count; i++) {
+        const particle = Bodies.circle(x, y, 3, {
+            label: 'blood',
+            isSensor: true,
+            render: { fillStyle: '#FF0000', strokeStyle: 'transparent', lineWidth: 0 }
+        });
+        const angle = Math.random() * 2 * Math.PI;
+        const speed = Math.random() * 5 + 1;
+        Body.setVelocity(particle, {
+            x: speed * Math.cos(angle),
+            y: speed * Math.sin(angle)
+        });
+        bloodParticles.push(particle);
+        World.add(world, particle);
+    }
+}
+
+// Function to cause an explosion
+function causeExplosion(x, y, radius) {
+    const bodies = Composite.allBodies(world);
+    const ragdollsToDismember = new Set();
+
+    bodies.forEach(body => {
+        if (body.label === 'ragdollPart' || body.label === 'piece' || body.label === 'debris') {
+            const distance = Matter.Vector.magnitude(Matter.Vector.sub(body.position, { x: x, y: y }));
+            if (distance < radius) {
+                const forceMagnitude = 0.1 * body.mass; // Increased force magnitude
+                const angle = Math.atan2(body.position.y - y, body.position.x - x);
+                Body.applyForce(body, body.position, {
+                    x: forceMagnitude * Math.cos(angle),
+                    y: forceMagnitude * Math.sin(angle)
+                });
+
+                if (body.label === 'ragdollPart') {
+                    // Collect ragdolls to dismember
+                    let ragdollToModify = null;
+                    for (let ragdoll of ragdolls) {
+                        if (Composite.allBodies(ragdoll).includes(body)) {
+                            ragdollToModify = ragdoll;
+                            break;
+                        }
+                    }
+                    if (ragdollToModify) {
+                        ragdollsToDismember.add(ragdollToModify);
+                    }
+                }
+
+                // Create blood particles at the body's position
+                if (body.label !== 'debris') {
+                    createBloodParticles(body.position.x, body.position.y, 10);
+                }
+            }
+        }
+    });
+
+    // Dismember ragdolls only once
+    ragdollsToDismember.forEach(ragdoll => {
+        dismemberRagdoll(ragdoll);
+
+        // Increase score
+        score += 50;
+        document.getElementById('score').innerText = score;
+    });
+
+    // Create explosion effect (e.g., particles)
+    createExplosionParticles(x, y);
+}
+
+// Function to create explosion particles
+function createExplosionParticles(x, y) {
+    for (let i = 0; i < 100; i++) { // Increased particle count
+        const particle = Bodies.circle(x, y, 3, {
+            label: 'explosion',
+            isSensor: true,
+            render: { fillStyle: '#FFA500', strokeStyle: 'transparent', lineWidth: 0 }
+        });
+        const angle = Math.random() * 2 * Math.PI;
+        const speed = Math.random() * 15 + 5; // Increased speed
+        Body.setVelocity(particle, {
+            x: speed * Math.cos(angle),
+            y: speed * Math.sin(angle)
+        });
+        bloodParticles.push(particle);
+        World.add(world, particle);
+    }
+}
+
+// Remove bullets, blood particles, debris, and evaporation particles after some time
+Events.on(engine, 'afterUpdate', function() {
+    // Remove bullets
+    for (let i = bullets.length - 1; i >= 0; i--) {
+        const bullet = bullets[i];
+        if (!bullet.lifeTime) {
+            bullet.lifeTime = 0;
+        }
+        bullet.lifeTime++;
+        if ((bullet.label === 'laserBeam' && bullet.lifeTime > 2) ||
+            (bullet.lifeTime > 200) ||
+            bullet.position.y < 0 ||
+            bullet.position.x < 0 ||
+            bullet.position.x > render.options.width ||
+            bullet.position.y > render.options.height) {
+            World.remove(world, bullet);
+            bullets.splice(i, 1);
+        }
+    }
+
+    // Remove blood, explosion, and evaporation particles
+    for (let i = bloodParticles.length - 1; i >= 0; i--) {
+        const particle = bloodParticles[i];
+        if (!particle.lifeTime) {
+            particle.lifeTime = 0;
+        }
+        particle.lifeTime++;
+        if (particle.lifeTime > 100) {
+            World.remove(world, particle);
+            bloodParticles.splice(i, 1);
+        }
+    }
+
+    // Remove debris that have fallen off the screen
+    for (let i = debrisObjects.length - 1; i >= 0; i--) {
+        const debris = debrisObjects[i];
+        if (debris.position.y > canvasHeight + 50) {
+            World.remove(world, debris);
+            debrisObjects.splice(i, 1);
+        }
+    }
+
+    // Remove ragdolls that have fallen through the floor or limit the number on the ground
+    for (let i = ragdolls.length - 1; i >= 0; i--) {
+        const ragdoll = ragdolls[i];
+        const bodies = Composite.allBodies(ragdoll);
+        let allBelowFloor = true;
+        for (let body of bodies) {
+            if (body.position.y < canvasHeight) {
+                allBelowFloor = false;
+                break;
+            }
+        }
+
+        if (allBelowFloor || bodies.length === 0) {
+            World.remove(world, ragdoll);
+            ragdolls.splice(i, 1);
+        } else {
+            // Check if ragdoll is on the ground
+            let isOnGround = false;
+            for (let body of bodies) {
+                if (Matter.SAT.collides(body, ground).collided) {
+                    isOnGround = true;
+                    break;
+                }
+            }
+            if (isOnGround && !ragdoll.healthDecreased && !ragdoll.isHit) {
+                // Decrease health only if the ragdoll has not been hit
+                decreaseHealth(10); // Adjusted health decrease amount
+                ragdoll.healthDecreased = true; // Mark as decreased
+
+                if (!groundRagdolls.includes(ragdoll)) {
+                    groundRagdolls.push(ragdoll);
+                }
+            }
+        }
+    }
+
+    // Limit the number of ragdolls on the ground
+    while (groundRagdolls.length > 2) {
+        const ragdollToRemove = groundRagdolls.shift();
+        World.remove(world, ragdollToRemove);
+        ragdolls.splice(ragdolls.indexOf(ragdollToRemove), 1);
+    }
+});
+
+// Custom rendering for weapons
+Events.on(render, 'afterRender', function() {
+    const context = render.context;
+    const mousePosition = mouse.position;
+
+    if (weaponMode === 'laser' && isAiming) {
+        context.beginPath();
+        context.moveTo(cannon.position.x, cannon.position.y);
+        context.lineTo(mousePosition.x, mousePosition.y);
+        context.strokeStyle = 'lime';
+        context.lineWidth = 2;
+        context.stroke();
+        context.closePath();
+    } else if (weaponMode === 'sniper') {
+        // Draw crosshair at mouse position
+        context.beginPath();
+        context.strokeStyle = 'blue';
+        context.lineWidth = 1;
+        // Horizontal line
+        context.moveTo(mousePosition.x - 10, mousePosition.y);
+        context.lineTo(mousePosition.x + 10, mousePosition.y);
+        // Vertical line
+        context.moveTo(mousePosition.x, mousePosition.y - 10);
+        context.lineTo(mousePosition.x, mousePosition.y + 10);
+        context.stroke();
+        context.closePath();
+    } else if (weaponMode === 'missile' && isAiming) {
+        // Draw targeting circle at mouse position
+        context.beginPath();
+        context.strokeStyle = 'orange';
+        context.lineWidth = 2;
+        context.arc(mousePosition.x, mousePosition.y, 25, 0, 2 * Math.PI); // Increased radius
+        context.stroke();
+        context.closePath();
+    } else if (weaponMode === 'shotgun' && isAiming) {
+        // Draw shotgun spread indicator
+        context.beginPath();
+        context.strokeStyle = 'brown';
+        context.lineWidth = 1;
+        context.moveTo(cannon.position.x, cannon.position.y);
+        const angle = Math.atan2(mousePosition.y - cannon.position.y, mousePosition.x - cannon.position.x);
+        const spread = 0.4;
+        context.lineTo(cannon.position.x + 1000 * Math.cos(angle - spread / 2), cannon.position.y + 1000 * Math.sin(angle - spread / 2));
+        context.moveTo(cannon.position.x, cannon.position.y);
+        context.lineTo(cannon.position.x + 1000 * Math.cos(angle + spread / 2), cannon.position.y + 1000 * Math.sin(angle + spread / 2));
+        context.stroke();
+        context.closePath();
+    } else if (weaponMode === 'ragdollLauncher' && isAiming) {
+        // Draw indicator for ragdoll launcher
+        context.beginPath();
+        context.strokeStyle = 'purple';
+        context.lineWidth = 2;
+        context.moveTo(cannon.position.x, cannon.position.y);
+        context.lineTo(mousePosition.x, mousePosition.y);
+        context.stroke();
+        context.closePath();
+    } else if (weaponMode === 'laserBlaster' && isAiming) {
+        // Draw laser beam indicator
+        context.beginPath();
+        context.strokeStyle = 'yellow';
+        context.lineWidth = 2;
+        context.moveTo(cannon.position.x, cannon.position.y);
+        context.lineTo(mousePosition.x, mousePosition.y);
+        context.stroke();
+        context.closePath();
+    } else if (weaponMode === 'discShooter' && isAiming) {
+        // Draw indicator for disc shooter
+        context.beginPath();
+        context.strokeStyle = 'gray';
+        context.lineWidth = 2;
+        context.moveTo(cannon.position.x, cannon.position.y);
+        context.lineTo(mousePosition.x, mousePosition.y);
+        context.stroke();
+        context.closePath();
+    }
+});
+
+// Function to create a wood chipper
+const chipperSpeed = 12; // Increased chipper speed by 20%
+
+function createWoodChipper() {
+    const chipper = Bodies.rectangle(200, canvasHeight - 60, 100, 50, {
+        label: 'woodChipper',
+        isStatic: true, // Make the wood chipper static to prevent it from falling
+        collisionFilter: {
+            category: woodChipperCategory,
+            mask: ragdollCategory // Wood chipper collides with ragdoll parts
+        },
+        render: { fillStyle: '#654321' } // Brown color for the wood chipper
+    });
+    World.add(world, chipper);
+    return chipper;
+}
+
+let woodChipper = null; // Declare the wood chipper
+
+// Spawn the wood chipper with the 'W' key
+document.addEventListener('keydown', function(event) {
+    if (event.code === 'KeyW' && !woodChipper) {
+        woodChipper = createWoodChipper();
+    }
+});
+
+// Control the wood chipper using arrow keys
+document.addEventListener('keydown', function(event) {
+    if (woodChipper) {
+        if (event.code === 'ArrowLeft') {
+            Body.translate(woodChipper, { x: -chipperSpeed, y: 0 }); // Move left
+        } else if (event.code === 'ArrowRight') {
+            Body.translate(woodChipper, { x: chipperSpeed, y: 0 }); // Move right
+        } else if (event.code === 'ArrowUp') {
+            Body.translate(woodChipper, { x: 0, y: -chipperSpeed }); // Move up
+        } else if (event.code === 'ArrowDown') {
+            Body.translate(woodChipper, { x: 0, y: chipperSpeed }); // Move down
+        }
+    }
+});
+
+// Function to spawn ragdoll pieces when a ragdoll hits the wood chipper
+function spawnRagdollPieces(x, y) {
+    // Head piece
+    const headPiece = Bodies.circle(x, y - 20, 10, {
+        label: 'piece',
+        render: { fillStyle: '#FFDBAC' } // Same skin color as ragdoll
+    });
+    World.add(world, headPiece);
+
+    // Torso piece
+    const torsoPiece = Bodies.rectangle(x, y, 30, 20, {
+        label: 'piece',
+        render: { fillStyle: '#FF0000' } // Red color for a "bloody" effect
+    });
+    World.add(world, torsoPiece);
+
+    // Left arm
+    const leftArmPiece = Bodies.rectangle(x - 15, y + 10, 15, 5, {
+        label: 'piece',
+        render: { fillStyle: '#FFDBAC' }
+    });
+    World.add(world, leftArmPiece);
+
+    // Right arm
+    const rightArmPiece = Bodies.rectangle(x + 15, y + 10, 15, 5, {
+        label: 'piece',
+        render: { fillStyle: '#FFDBAC' }
+    });
+    World.add(world, rightArmPiece);
+
+    // Left leg
+    const leftLegPiece = Bodies.rectangle(x - 10, y + 30, 15, 5, {
+        label: 'piece',
+        render: { fillStyle: '#FFDBAC' }
+    });
+    World.add(world, leftLegPiece);
+
+    // Right leg
+    const rightLegPiece = Bodies.rectangle(x + 10, y + 30, 15, 5, {
+        label: 'piece',
+        render: { fillStyle: '#FFDBAC' }
+    });
+    World.add(world, rightLegPiece);
+
+    // Add forces to scatter the pieces
+    const pieces = [headPiece, torsoPiece, leftArmPiece, rightArmPiece, leftLegPiece, rightLegPiece];
+    pieces.forEach(piece => {
+        const angle = Math.random() * Math.PI * 2;
+        const forceMagnitude = 0.05 * piece.mass;
+        Body.applyForce(piece, piece.position, {
+            x: forceMagnitude * Math.cos(angle),
+            y: forceMagnitude * Math.sin(angle)
+        });
+    });
+
+    // Create extra blood particles
+    createBloodParticles(x, y, 50); // Increased particles
+}
+
+</script>
+
+</body>
+</html>
